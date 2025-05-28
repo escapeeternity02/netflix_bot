@@ -1,14 +1,14 @@
 import logging
 from aiogram import Bot, Dispatcher, types
-from aiogram.utils.executor import start_webhook
 from aiohttp import web
+from aiogram.types import Update
 
 # === CONFIG ===
 BOT_TOKEN = '7760347190:AAFU8sCNijevrjQgWEKQ4IA_4XY1U3-lvRQ'
 ADMIN_ID = 6249999953
 GMAIL_USER = 'escapeeternity05@gmail.com'
 GMAIL_PASS = 'Escapeeternity05$'
-WEBHOOK_HOST = 'https://your-render-domain.onrender.com'  # <-- Replace with your Render URL
+WEBHOOK_HOST = 'https://netflix-bot-a9ii.onrender.com'  # Replace with your Render URL
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
 PORT = 3000
@@ -23,7 +23,7 @@ dp = Dispatcher(bot)
 
 # === Dummy DB and utils ===
 user_states = {}
-pending_payments = {}  # user_id: {duration, file_id}
+pending_payments = {}
 gmail_accounts = [(GMAIL_USER, GMAIL_PASS)]
 price_list = {'1m': 100, '2m': 190, '3m': 270, '6m': 520, '12m': 1000}
 
@@ -68,18 +68,16 @@ def is_valid_duration(text):
     return text in price_list
 
 def check_gmail_for_code(user_id, code):
-    return code.isdigit() and len(code) >= 4  # Dummy implementation
+    return code.isdigit() and len(code) >= 4  # Dummy validation
 
 # === Handlers ===
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    logger.info(f"/start from {message.from_user.id}")
     user_states[message.from_user.id] = {}
     await message.answer("📺 Welcome! Choose your Netflix plan:", reply_markup=build_main_menu())
 
 @dp.message_handler(lambda m: m.text == "Buy Netflix 1 Screen")
 async def buy_1screen(message: types.Message):
-    logger.info(f"User {message.from_user.id} wants to buy 1 screen Netflix")
     user_states[message.from_user.id] = {"step": "choose_duration"}
     await message.answer("⏱ Choose duration:", reply_markup=build_duration_menu())
 
@@ -88,7 +86,6 @@ async def choose_duration(message: types.Message):
     duration = message.text
     price = get_price(duration)
     user_states[message.from_user.id] = {"step": "awaiting_payment", "duration": duration}
-    logger.info(f"User {message.from_user.id} chose duration {duration} costing {price}")
     await message.answer(f"💰 Price for {duration}: ₹{price}\n\nPlease pay via UPI/USDT and send payment screenshot.")
 
 @dp.message_handler(content_types=types.ContentType.PHOTO)
@@ -96,12 +93,10 @@ async def receive_payment_screenshot(message: types.Message):
     user_id = message.from_user.id
     state = user_states.get(user_id)
     if not state or state.get("step") != "awaiting_payment":
-        logger.warning(f"Unexpected payment screenshot from {user_id}")
         return
     duration = state["duration"]
     file_id = message.photo[-1].file_id
     add_pending_user(user_id, duration, file_id)
-    logger.info(f"Received payment proof from {user_id} for {duration}")
 
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     keyboard.add(
@@ -115,28 +110,23 @@ async def receive_payment_screenshot(message: types.Message):
 async def on_approve(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("❌ Unauthorized", show_alert=True)
-        logger.warning(f"Unauthorized approve attempt by {callback.from_user.id}")
         return
     user_id = int(callback.data.split("_")[1])
     gmail = get_next_gmail()
     if not gmail:
         await callback.message.answer("❌ No Gmail accounts available")
-        logger.error("No Gmail account available for approval")
         return
     approve_user(user_id)
-    logger.info(f"User {user_id} approved by admin")
-    await bot.send_message(user_id, f"✅ Approved!\nLogin to this Gmail:\n\n📧 {gmail[0]}\n🔑 {gmail[1]}\n\nSend the Netflix login code here.")
+    await bot.send_message(user_id, f"✅ Approved!\nLogin Gmail:\n📧 {gmail[0]}\n🔑 {gmail[1]}\nSend Netflix code here.")
     await callback.answer("User approved")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("reject_"))
 async def on_reject(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("❌ Unauthorized", show_alert=True)
-        logger.warning(f"Unauthorized reject attempt by {callback.from_user.id}")
         return
     user_id = int(callback.data.split("_")[1])
     reject_user(user_id)
-    logger.info(f"User {user_id} rejected by admin")
     await bot.send_message(user_id, "❌ Your payment was rejected.")
     await callback.answer("User rejected")
 
@@ -166,8 +156,6 @@ async def manual_approve_reject(message: types.Message):
         reject_user(user_id)
         await bot.send_message(user_id, "❌ Your payment was rejected.")
         await message.answer(f"User {user_id} rejected.")
-    else:
-        await message.answer("❌ Unknown command. Use /approve or /reject.")
 
 @dp.message_handler(commands=["set_price"])
 async def cmd_set_price(message: types.Message):
@@ -220,27 +208,29 @@ async def cmd_help(message: types.Message):
     )
     await message.answer(help_text)
 
-# === Aiohttp web server and webhook setup ===
+# === Webhook Setup ===
 async def on_startup(app):
-    logger.info("Setting webhook")
+    logger.info("Setting webhook...")
     await bot.set_webhook(WEBHOOK_URL)
 
 async def on_shutdown(app):
-    logger.info("Removing webhook")
+    logger.info("Removing webhook...")
     await bot.delete_webhook()
 
+async def handle_webhook(request):
+    try:
+        data = await request.json()
+        update = Update(**data)
+        await dp.process_update(update)
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+    return web.Response()
+
 app = web.Application()
-app.router.add_post(WEBHOOK_PATH, dp.updates_handler)
+app.router.add_post(WEBHOOK_PATH, handle_webhook)
+app.on_startup.append(on_startup)
+app.on_shutdown.append(on_shutdown)
 
 if __name__ == '__main__':
-    logger.info("Starting bot...")
-    start_webhook(
-        app,                 # pass app **as first positional argument**
-        dispatcher=dp,
-        webhook_path=WEBHOOK_PATH,
-       on_startup=on_startup,
-on_shutdown=on_shutdown,
-skip_updates=True,
-host='0.0.0.0',
-port=PORT,
-)
+    logger.info("Bot starting with webhook...")
+    web.run_app(app, host='0.0.0.0', port=PORT)

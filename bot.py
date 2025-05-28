@@ -9,6 +9,7 @@ from aiohttp import web
 BOT_TOKEN = '7760347190:AAFU8sCNijevrjQgWEKQ4IA_4XY1U3-lvRQ'
 ADMIN_ID = 6249999953  # Replace with real admin ID
 GMAIL_USER = 'escapeeternity05@gmail.com'
+GMAIL_PASS = 'Escapeeternity05$'
 WEBHOOK_HOST = 'https://netflix-bot-a9ii.onrender.com''
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH

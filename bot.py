@@ -2,28 +2,26 @@ import logging
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils.executor import start_webhook
 from aiohttp import web
-from aiogram.types import Update
 
-# === CONFIG - replace these with your actual values ===
+# === CONFIG ===
 BOT_TOKEN = '7760347190:AAFU8sCNijevrjQgWEKQ4IA_4XY1U3-lvRQ'
 ADMIN_ID = 6249999953
 GMAIL_USER = 'escapeeternity05@gmail.com'
 GMAIL_PASS = 'Escapeeternity05$'
-WEBHOOK_HOST = 'https://your-render-domain.onrender.com'  # Replace with your Render URL here
+WEBHOOK_HOST = 'https://your-render-domain.onrender.com'  # <-- Replace with your Render URL
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
 PORT = 3000
 
-# === Initialize logging ===
+# === Logging ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# === Initialize bot and dispatcher ===
+# === Bot and Dispatcher ===
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
-# === Dummy DB and utils implementations, replace with real ones ===
-
+# === Dummy DB and utils ===
 user_states = {}
 pending_payments = {}  # user_id: {duration, file_id}
 gmail_accounts = [(GMAIL_USER, GMAIL_PASS)]
@@ -69,14 +67,10 @@ def build_duration_menu():
 def is_valid_duration(text):
     return text in price_list
 
-# Fake Gmail code check
 def check_gmail_for_code(user_id, code):
-    # Here you would implement actual Gmail IMAP check for the code
-    # For demo, accept any 4+ digit numeric code
-    return code.isdigit() and len(code) >= 4
+    return code.isdigit() and len(code) >= 4  # Dummy implementation
 
 # === Handlers ===
-
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     logger.info(f"/start from {message.from_user.id}")
@@ -222,50 +216,31 @@ async def cmd_help(message: types.Message):
         "/help - Show help\n"
         "Buy Netflix 1 Screen from menu.\n"
         "Send payment screenshot after choosing duration.\n"
-        "After approval, receive login details and send Netflix login code.\n\n"
-        "Admin Commands (only for admin):\n"
-        "/approve <user_id> - Approve payment\n"
-        "/reject <user_id> - Reject payment\n"
-        "/set_price <duration> <amount> - Set price\n"
-        "/add_gmail <email> <password> - Add Gmail account\n"
-        "/pending - List pending payments"
+        "After approval, receive login details.\n"
     )
     await message.answer(help_text)
 
-
-# === Webhook setup for running on Render or similar hosting ===
-
+# === Aiohttp web server and webhook setup ===
 async def on_startup(app):
+    logger.info("Setting webhook")
     await bot.set_webhook(WEBHOOK_URL)
-    logger.info(f"Webhook set to {WEBHOOK_URL}")
 
 async def on_shutdown(app):
-    logger.info("Shutting down..")
+    logger.info("Removing webhook")
     await bot.delete_webhook()
-    logger.info("Webhook deleted")
-
-async def handle(request):
-    try:
-        update = Update(**await request.json())
-    except Exception as e:
-        logger.error(f"Failed to parse update: {e}")
-        return web.Response(status=400)
-
-    await dp.process_update(update)
-    return web.Response(status=200)
 
 app = web.Application()
-app.router.add_post(WEBHOOK_PATH, handle)
+app.router.add_post(WEBHOOK_PATH, dp.update_handler)
 
 if __name__ == '__main__':
-    logger.info("Starting bot")
+    logger.info("Starting bot...")
     start_webhook(
+        app,                 # pass app **as first positional argument**
         dispatcher=dp,
         webhook_path=WEBHOOK_PATH,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown,
-        skip_updates=True,
-        host='0.0.0.0',
-        port=PORT,
-        app=app,
-    )
+       on_startup=on_startup,
+on_shutdown=on_shutdown,
+skip_updates=True,
+host='0.0.0.0',
+port=PORT,
+)

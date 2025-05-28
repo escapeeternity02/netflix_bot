@@ -1,231 +1,134 @@
 import logging
 from aiogram import Bot, Dispatcher, types
-from aiohttp import web
 from aiogram.types import Update
+from aiohttp import web
 
 # === CONFIG ===
 BOT_TOKEN = '7760347190:AAFU8sCNijevrjQgWEKQ4IA_4XY1U3-lvRQ'
-ADMIN_ID = 6249999953
+ADMIN_ID = 6249999953  # Replace with real admin ID
 GMAIL_USER = 'escapeeternity05@gmail.com'
-GMAIL_PASS = 'Escapeeternity05$'
-WEBHOOK_HOST = 'https://netflix-bot-a9ii.onrender.com'  # Replace with your Render URL
+WEBHOOK_HOST = 'https://netflix-bot-a9ii.onrender.com''
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
 PORT = 3000
 
-# === Logging ===
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# === Bot and Dispatcher ===
+logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
-# === Dummy DB and utils ===
+# State management
 user_states = {}
 pending_payments = {}
-gmail_accounts = [(GMAIL_USER, GMAIL_PASS)]
-price_list = {'1m': 100, '2m': 190, '3m': 270, '6m': 520, '12m': 1000}
-
-def get_price(duration):
-    return price_list.get(duration, 0)
-
-def set_price(duration, amount):
-    price_list[duration] = amount
-
-def add_pending_user(user_id, duration, file_id):
-    pending_payments[user_id] = {'duration': duration, 'file_id': file_id}
-
-def get_pending_users():
-    return [(uid, info['duration']) for uid, info in pending_payments.items()]
-
-def approve_user(user_id):
-    pending_payments.pop(user_id, None)
-
-def reject_user(user_id):
-    pending_payments.pop(user_id, None)
-
-def get_next_gmail():
-    if gmail_accounts:
-        return gmail_accounts[0]
-    return None
-
-def add_gmail(email, password):
-    gmail_accounts.append((email, password))
+price_list_screen = {'1m': 89, '2m': 159, '3m': 235, '6m': 435, '12m': 599}
+price_list_full = {'1m': 325, '3m': 775}
+payment_methods = ['UPI/QR', 'USDT (Bep20)', 'Binance ID']
+payment_info = {'upi': 'your-upi@upi', 'usdt': 'your-usdt-address', 'binance': 'binance-id'}
 
 def build_main_menu():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(types.KeyboardButton("Buy Netflix 1 Screen"))
+    keyboard.add("Netflix 1 Screen", "Netflix Full Account")
     return keyboard
 
-def build_duration_menu():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for dur in ['1m', '2m', '3m', '6m', '12m']:
-        keyboard.add(types.KeyboardButton(dur))
-    return keyboard
-
-def is_valid_duration(text):
-    return text in price_list
-
-def check_gmail_for_code(user_id, code):
-    return code.isdigit() and len(code) >= 4  # Dummy validation
-
-# === Handlers ===
 @dp.message_handler(commands=['start'])
-async def cmd_start(message: types.Message):
-    user_states[message.from_user.id] = {}
-    await message.answer("📺 Welcome! Choose your Netflix plan:", reply_markup=build_main_menu())
+async def start_cmd(message: types.Message):
+    await message.answer("Welcome! Choose a Netflix service:", reply_markup=build_main_menu())
 
-@dp.message_handler(lambda m: m.text == "Buy Netflix 1 Screen")
-async def buy_1screen(message: types.Message):
-    user_states[message.from_user.id] = {"step": "choose_duration"}
-    await message.answer("⏱ Choose duration:", reply_markup=build_duration_menu())
+@dp.message_handler(lambda m: m.text == "Netflix 1 Screen")
+async def handle_1screen(message: types.Message):
+    user_states[message.from_user.id] = {'type': 'screen'}
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for k, v in price_list_screen.items():
+        keyboard.add(f"{k} - ₹{v}")
+    await message.answer("Choose Duration:", reply_markup=keyboard)
 
-@dp.message_handler(lambda m: is_valid_duration(m.text) and user_states.get(m.from_user.id, {}).get("step") == "choose_duration")
-async def choose_duration(message: types.Message):
-    duration = message.text
-    price = get_price(duration)
-    user_states[message.from_user.id] = {"step": "awaiting_payment", "duration": duration}
-    await message.answer(f"💰 Price for {duration}: ₹{price}\n\nPlease pay via UPI/USDT and send payment screenshot.")
+@dp.message_handler(lambda m: m.text == "Netflix Full Account")
+async def handle_full_account(message: types.Message):
+    user_states[message.from_user.id] = {'type': 'full'}
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for k, v in price_list_full.items():
+        keyboard.add(f"{k} - ₹{v}")
+    await message.answer("Choose Duration:", reply_markup=keyboard)
+
+@dp.message_handler(lambda m: any(x in m.text for x in ['1m', '3m', '2m', '6m', '12m']))
+async def handle_duration(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in user_states: return
+    duration = message.text.split()[0]
+    user_states[user_id]['duration'] = duration
+
+    if user_states[user_id]['type'] == 'full':
+        user_states[user_id]['step'] = 'email'
+        await message.answer("✉️ Please drop your email where you want the Netflix account:")
+    else:
+        user_states[user_id]['step'] = 'payment_method'
+        await ask_payment_method(message)
+
+@dp.message_handler(lambda m: '@' in m.text or '.' in m.text)
+async def handle_email(message: types.Message):
+    user_id = message.from_user.id
+    if user_states.get(user_id, {}).get('step') != 'email':
+        return
+    user_states[user_id]['email'] = message.text
+    user_states[user_id]['step'] = 'payment_method'
+    await ask_payment_method(message)
+
+async def ask_payment_method(message):
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for method in payment_methods:
+        keyboard.add(method)
+    await message.answer("Please select a payment method to pay!", reply_markup=keyboard)
+
+@dp.message_handler(lambda m: m.text in payment_methods)
+async def handle_payment_method(message: types.Message):
+    user_id = message.from_user.id
+    user_states[user_id]['payment_method'] = message.text
+    await message.answer(f"Pay to this address:
+{payment_info[message.text.split()[0].lower()]}
+
+After payment, send the screenshot.")
 
 @dp.message_handler(content_types=types.ContentType.PHOTO)
-async def receive_payment_screenshot(message: types.Message):
+async def handle_screenshot(message: types.Message):
     user_id = message.from_user.id
-    state = user_states.get(user_id)
-    if not state or state.get("step") != "awaiting_payment":
+    if user_id not in user_states:
         return
-    duration = state["duration"]
-    file_id = message.photo[-1].file_id
-    add_pending_user(user_id, duration, file_id)
-
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        types.InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user_id}"),
-        types.InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
-    )
-    await bot.send_message(ADMIN_ID, f"🧾 New payment request from user {user_id} for {duration}", reply_markup=keyboard)
-    await message.answer("🕐 Payment sent. Waiting for admin approval.")
+    pending_payments[user_id] = user_states[user_id]
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(types.InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user_id}"))
+    keyboard.add(types.InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}"))
+    await bot.send_message(ADMIN_ID, f"New payment received from {user_id}:
+{pending_payments[user_id]}", reply_markup=keyboard)
+    await message.answer("Thanks for the payment! Admin will verify in 0-12 hours.")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("approve_"))
-async def on_approve(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("❌ Unauthorized", show_alert=True)
-        return
+async def approve_user(callback: types.CallbackQuery):
     user_id = int(callback.data.split("_")[1])
-    gmail = get_next_gmail()
-    if not gmail:
-        await callback.message.answer("❌ No Gmail accounts available")
-        return
-    approve_user(user_id)
-    await bot.send_message(user_id, f"✅ Approved!\nLogin Gmail:\n📧 {gmail[0]}\n🔑 {gmail[1]}\nSend Netflix code here.")
-    await callback.answer("User approved")
+    if user_states[user_id]['type'] == 'screen':
+        await bot.send_message(user_id, f"✅ Payment Verified!
+Login Gmail:
+📧 {GMAIL_USER}
+Please Use Sign-In Code to Login.
+Tap 'OTP SENDED' when ready.")
+    else:
+        await bot.send_message(user_id, "✅ Payment Verified! Your account will be transferred to your mail soon.")
+    await callback.answer("Approved")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("reject_"))
-async def on_reject(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("❌ Unauthorized", show_alert=True)
-        return
+async def reject_user(callback: types.CallbackQuery):
     user_id = int(callback.data.split("_")[1])
-    reject_user(user_id)
     await bot.send_message(user_id, "❌ Your payment was rejected.")
-    await callback.answer("User rejected")
+    await callback.answer("Rejected")
 
-@dp.message_handler(commands=["approve", "reject"])
-async def manual_approve_reject(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    parts = message.text.split()
-    if len(parts) != 2:
-        await message.answer("❌ Usage: /approve <user_id> or /reject <user_id>")
-        return
-    cmd, uid = parts
-    try:
-        user_id = int(uid)
-    except:
-        await message.answer("❌ Invalid user ID")
-        return
-    if cmd == "/approve":
-        gmail = get_next_gmail()
-        if not gmail:
-            await message.answer("❌ No Gmail available.")
-            return
-        approve_user(user_id)
-        await bot.send_message(user_id, f"✅ Approved!\nGmail: {gmail[0]}\nPass: {gmail[1]}")
-        await message.answer(f"User {user_id} approved.")
-    elif cmd == "/reject":
-        reject_user(user_id)
-        await bot.send_message(user_id, "❌ Your payment was rejected.")
-        await message.answer(f"User {user_id} rejected.")
-
-@dp.message_handler(commands=["set_price"])
-async def cmd_set_price(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("❌ Usage: /set_price <duration> <amount>")
-        return
-    _, duration, amount = parts
-    try:
-        amount = int(amount)
-        set_price(duration, amount)
-        await message.answer(f"✅ Price for {duration} set to ₹{amount}")
-    except:
-        await message.answer("❌ Invalid amount")
-
-@dp.message_handler(commands=["add_gmail"])
-async def cmd_add_gmail(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("❌ Usage: /add_gmail <email> <pass>")
-        return
-    _, email, password = parts
-    add_gmail(email, password)
-    await message.answer("✅ Gmail added.")
-
-@dp.message_handler(commands=["pending"])
-async def cmd_pending(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    pending = get_pending_users()
-    if not pending:
-        await message.answer("No pending users.")
-        return
-    text = "\n".join([f"{uid} - {dur}" for uid, dur in pending])
-    await message.answer(text)
-
-@dp.message_handler(commands=['help'])
-async def cmd_help(message: types.Message):
-    help_text = (
-        "User Commands:\n"
-        "/start - Start bot\n"
-        "/help - Show help\n"
-        "Buy Netflix 1 Screen from menu.\n"
-        "Send payment screenshot after choosing duration.\n"
-        "After approval, receive login details.\n"
-    )
-    await message.answer(help_text)
-
-# === Webhook Setup ===
 async def on_startup(app):
-    logger.info("Setting webhook...")
     await bot.set_webhook(WEBHOOK_URL)
 
 async def on_shutdown(app):
-    logger.info("Removing webhook...")
     await bot.delete_webhook()
 
 async def handle_webhook(request):
-    try:
-        data = await request.json()
-        update = Update(**data)
-        Bot.set_current(bot)        # <- FIXED
-        Dispatcher.set_current(dp)  # <- FIXED
-        await dp.process_update(update)
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
+    data = await request.json()
+    update = Update(**data)
+    await dp.process_update(update)
     return web.Response()
 
 app = web.Application()
@@ -234,5 +137,4 @@ app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
 if __name__ == '__main__':
-    logger.info("Bot starting with webhook...")
     web.run_app(app, host='0.0.0.0', port=PORT)

@@ -1,3 +1,5 @@
+# main.py
+
 import logging
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import Update
@@ -7,7 +9,7 @@ from aiohttp import web
 BOT_TOKEN = '7760347190:AAFU8sCNijevrjQgWEKQ4IA_4XY1U3-lvRQ'
 ADMIN_ID = 6249999953  # Replace with real admin ID
 GMAIL_USER = 'escapeeternity05@gmail.com'
-WEBHOOK_HOST = 'https://netflix-bot-a9ii.onrender.com'
+WEBHOOK_HOST = 'https://netflix-bot-a9ii.onrender.com''
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
 PORT = 3000
@@ -138,3 +140,46 @@ app.on_shutdown.append(on_shutdown)
 
 if __name__ == '__main__':
     web.run_app(app, host='0.0.0.0', port=PORT)
+
+
+import imaplib
+import email
+import re
+
+def fetch_netflix_code_from_gmail():
+    try:
+        imap_host = 'imap.gmail.com'
+        email_user = GMAIL_USER
+        email_pass = GMAIL_PASS
+
+        mail = imaplib.IMAP4_SSL(imap_host)
+        mail.login(email_user, email_pass)
+        mail.select('inbox')
+
+        result, data = mail.search(None, '(UNSEEN SUBJECT "Netflix")')
+        if result != 'OK':
+            return None
+
+        mail_ids = data[0].split()
+        for num in reversed(mail_ids[-5:]):  # Check latest 5 unread emails
+            result, msg_data = mail.fetch(num, '(RFC822)')
+            if result != 'OK':
+                continue
+
+            raw_email = msg_data[0][1]
+            msg = email.message_from_bytes(raw_email)
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == 'text/plain':
+                        body = part.get_payload(decode=True).decode()
+                        code_match = re.search(r'\b\d{4}\b', body)
+                        if code_match:
+                            return code_match.group(0)
+            else:
+                body = msg.get_payload(decode=True).decode()
+                code_match = re.search(r'\b\d{4}\b', body)
+                if code_match:
+                    return code_match.group(0)
+    except Exception as e:
+        print(f"Gmail fetch error: {e}")
+        return None

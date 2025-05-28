@@ -230,7 +230,7 @@ async def on_shutdown(app):
     await bot.delete_webhook()
 
 app = web.Application()
-app.router.add_post(WEBHOOK_PATH, dp.update_handler)
+app.router.add_post(WEBHOOK_PATH, dp.updates_handler)
 
 if __name__ == '__main__':
     logger.info("Starting bot...")

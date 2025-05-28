@@ -1,134 +1,271 @@
 import logging
-from aiogram import Bot, Dispatcher, executor, types
-from db import init_db, add_pending_user, get_price, set_price, get_next_gmail, add_gmail, get_pending_users, approve_user, reject_user
-from gmail_checker import check_gmail_for_code
-from utils import build_main_menu, build_duration_menu, is_valid_duration
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils.executor import start_webhook
+from aiohttp import web
+from aiogram.types import Update
 
-# === CONFIG (Replace below) ===
+# === CONFIG - replace these with your actual values ===
 BOT_TOKEN = '7760347190:AAFU8sCNijevrjQgWEKQ4IA_4XY1U3-lvRQ'
 ADMIN_ID = 6249999953
 GMAIL_USER = 'escapeeternity05@gmail.com'
 GMAIL_PASS = 'Escapeeternity05$'
+WEBHOOK_HOST = 'https://your-render-domain.onrender.com'  # Replace with your Render URL here
+WEBHOOK_PATH = '/webhook'
+WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
+PORT = 3000
 
-# === Init ===
-logging.basicConfig(level=logging.INFO)
+# === Initialize logging ===
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# === Initialize bot and dispatcher ===
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
-init_db()
+
+# === Dummy DB and utils implementations, replace with real ones ===
 
 user_states = {}
+pending_payments = {}  # user_id: {duration, file_id}
+gmail_accounts = [(GMAIL_USER, GMAIL_PASS)]
+price_list = {'1m': 100, '2m': 190, '3m': 270, '6m': 520, '12m': 1000}
+
+def get_price(duration):
+    return price_list.get(duration, 0)
+
+def set_price(duration, amount):
+    price_list[duration] = amount
+
+def add_pending_user(user_id, duration, file_id):
+    pending_payments[user_id] = {'duration': duration, 'file_id': file_id}
+
+def get_pending_users():
+    return [(uid, info['duration']) for uid, info in pending_payments.items()]
+
+def approve_user(user_id):
+    pending_payments.pop(user_id, None)
+
+def reject_user(user_id):
+    pending_payments.pop(user_id, None)
+
+def get_next_gmail():
+    if gmail_accounts:
+        return gmail_accounts[0]
+    return None
+
+def add_gmail(email, password):
+    gmail_accounts.append((email, password))
+
+def build_main_menu():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton("Buy Netflix 1 Screen"))
+    return keyboard
+
+def build_duration_menu():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for dur in ['1m', '2m', '3m', '6m', '12m']:
+        keyboard.add(types.KeyboardButton(dur))
+    return keyboard
+
+def is_valid_duration(text):
+    return text in price_list
+
+# Fake Gmail code check
+def check_gmail_for_code(user_id, code):
+    # Here you would implement actual Gmail IMAP check for the code
+    # For demo, accept any 4+ digit numeric code
+    return code.isdigit() and len(code) >= 4
+
+# === Handlers ===
 
 @dp.message_handler(commands=['start'])
-async def start(msg: types.Message):
-    await msg.answer("📺 Welcome! Choose your Netflix plan:", reply_markup=build_main_menu())
+async def cmd_start(message: types.Message):
+    logger.info(f"/start from {message.from_user.id}")
+    user_states[message.from_user.id] = {}
+    await message.answer("📺 Welcome! Choose your Netflix plan:", reply_markup=build_main_menu())
 
 @dp.message_handler(lambda m: m.text == "Buy Netflix 1 Screen")
-async def buy_1screen(msg: types.Message):
-    user_states[msg.from_user.id] = {"step": "choose_duration"}
-    await msg.answer("⏱ Choose duration:", reply_markup=build_duration_menu())
+async def buy_1screen(message: types.Message):
+    logger.info(f"User {message.from_user.id} wants to buy 1 screen Netflix")
+    user_states[message.from_user.id] = {"step": "choose_duration"}
+    await message.answer("⏱ Choose duration:", reply_markup=build_duration_menu())
 
 @dp.message_handler(lambda m: is_valid_duration(m.text) and user_states.get(m.from_user.id, {}).get("step") == "choose_duration")
-async def choose_duration(msg: types.Message):
-    duration = msg.text
+async def choose_duration(message: types.Message):
+    duration = message.text
     price = get_price(duration)
-    user_states[msg.from_user.id] = {"step": "awaiting_payment", "duration": duration}
-    await msg.answer(f"💰 Price for {duration}: ₹{price}\n\nPlease pay via UPI/USDT and send payment screenshot.")
+    user_states[message.from_user.id] = {"step": "awaiting_payment", "duration": duration}
+    logger.info(f"User {message.from_user.id} chose duration {duration} costing {price}")
+    await message.answer(f"💰 Price for {duration}: ₹{price}\n\nPlease pay via UPI/USDT and send payment screenshot.")
 
 @dp.message_handler(content_types=types.ContentType.PHOTO)
-async def receive_payment_proof(msg: types.Message):
-    user_data = user_states.get(msg.from_user.id)
-    if not user_data or user_data.get("step") != "awaiting_payment":
+async def receive_payment_screenshot(message: types.Message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    if not state or state.get("step") != "awaiting_payment":
+        logger.warning(f"Unexpected payment screenshot from {user_id}")
         return
+    duration = state["duration"]
+    file_id = message.photo[-1].file_id
+    add_pending_user(user_id, duration, file_id)
+    logger.info(f"Received payment proof from {user_id} for {duration}")
 
-    duration = user_data["duration"]
-    file_id = msg.photo[-1].file_id
-    add_pending_user(msg.from_user.id, duration, file_id)
-
-    await bot.send_message(
-        ADMIN_ID,
-        f"🧾 New Payment Request\nUser: {msg.from_user.id}\nDuration: {duration}",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("✅ Approve", callback_data=f"approve_{msg.from_user.id}"),
-            types.InlineKeyboardButton("❌ Reject", callback_data=f"reject_{msg.from_user.id}")
-        )
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        types.InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user_id}"),
+        types.InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
     )
-    await msg.answer("🕐 Payment sent. Waiting for admin approval.")
+    await bot.send_message(ADMIN_ID, f"🧾 New payment request from user {user_id} for {duration}", reply_markup=keyboard)
+    await message.answer("🕐 Payment sent. Waiting for admin approval.")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("approve_"))
-async def handle_approve(callback: types.CallbackQuery):
+async def on_approve(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Unauthorized", show_alert=True)
+        logger.warning(f"Unauthorized approve attempt by {callback.from_user.id}")
+        return
     user_id = int(callback.data.split("_")[1])
     gmail = get_next_gmail()
     if not gmail:
-        await callback.message.answer("❌ No Gmail account available.")
+        await callback.message.answer("❌ No Gmail accounts available")
+        logger.error("No Gmail account available for approval")
         return
-
     approve_user(user_id)
+    logger.info(f"User {user_id} approved by admin")
     await bot.send_message(user_id, f"✅ Approved!\nLogin to this Gmail:\n\n📧 {gmail[0]}\n🔑 {gmail[1]}\n\nSend the Netflix login code here.")
     await callback.answer("User approved")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("reject_"))
-async def handle_reject(callback: types.CallbackQuery):
+async def on_reject(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Unauthorized", show_alert=True)
+        logger.warning(f"Unauthorized reject attempt by {callback.from_user.id}")
+        return
     user_id = int(callback.data.split("_")[1])
     reject_user(user_id)
+    logger.info(f"User {user_id} rejected by admin")
     await bot.send_message(user_id, "❌ Your payment was rejected.")
     await callback.answer("User rejected")
 
 @dp.message_handler(commands=["approve", "reject"])
-async def manual_approval_cmd(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
+async def manual_approve_reject(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
         return
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("❌ Usage: /approve <user_id> or /reject <user_id>")
+        return
+    cmd, uid = parts
     try:
-        cmd, uid = msg.text.split()
         user_id = int(uid)
-        if cmd == "/approve":
-            gmail = get_next_gmail()
-            if not gmail:
-                await msg.answer("No Gmail available.")
-                return
-            approve_user(user_id)
-            await bot.send_message(user_id, f"✅ Approved!\nGmail: {gmail[0]}\nPass: {gmail[1]}")
-        elif cmd == "/reject":
-            reject_user(user_id)
-            await bot.send_message(user_id, "❌ Your payment was rejected.")
     except:
-        await msg.answer("❌ Usage: /approve <user_id>")
+        await message.answer("❌ Invalid user ID")
+        return
+    if cmd == "/approve":
+        gmail = get_next_gmail()
+        if not gmail:
+            await message.answer("❌ No Gmail available.")
+            return
+        approve_user(user_id)
+        await bot.send_message(user_id, f"✅ Approved!\nGmail: {gmail[0]}\nPass: {gmail[1]}")
+        await message.answer(f"User {user_id} approved.")
+    elif cmd == "/reject":
+        reject_user(user_id)
+        await bot.send_message(user_id, "❌ Your payment was rejected.")
+        await message.answer(f"User {user_id} rejected.")
+    else:
+        await message.answer("❌ Unknown command. Use /approve or /reject.")
 
 @dp.message_handler(commands=["set_price"])
-async def set_price_cmd(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
+async def cmd_set_price(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
         return
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("❌ Usage: /set_price <duration> <amount>")
+        return
+    _, duration, amount = parts
     try:
-        _, duration, amount = msg.text.split()
-        set_price(duration, int(amount))
-        await msg.answer(f"✅ Price for {duration} set to ₹{amount}")
+        amount = int(amount)
+        set_price(duration, amount)
+        await message.answer(f"✅ Price for {duration} set to ₹{amount}")
     except:
-        await msg.answer("❌ Usage: /set_price 1m 100")
+        await message.answer("❌ Invalid amount")
 
 @dp.message_handler(commands=["add_gmail"])
-async def add_gmail_cmd(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
+async def cmd_add_gmail(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
         return
-    try:
-        _, email, password = msg.text.split()
-        add_gmail(email, password)
-        await msg.answer("✅ Gmail added.")
-    except:
-        await msg.answer("❌ Usage: /add_gmail email pass")
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("❌ Usage: /add_gmail <email> <pass>")
+        return
+    _, email, password = parts
+    add_gmail(email, password)
+    await message.answer("✅ Gmail added.")
 
 @dp.message_handler(commands=["pending"])
-async def pending_cmd(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
+async def cmd_pending(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
         return
     pending = get_pending_users()
-    text = "\n".join([f"{u[0]} - {u[1]}" for u in pending]) or "No pending users."
-    await msg.answer(text)
+    if not pending:
+        await message.answer("No pending users.")
+        return
+    text = "\n".join([f"{uid} - {dur}" for uid, dur in pending])
+    await message.answer(text)
 
-@dp.message_handler()
-async def handle_code(msg: types.Message):
-    code = msg.text.strip()
-    if len(code) >= 4 and code.isdigit():
-        found = check_gmail_for_code(GMAIL_USER, GMAIL_PASS, code)
-        if found:
-            await msg.answer("✅ Code verified! You're logged in.")
-        else:
-            await msg.answer("❌ Code not found in Netflix emails. Try again.")
+@dp.message_handler(commands=['help'])
+async def cmd_help(message: types.Message):
+    help_text = (
+        "User Commands:\n"
+        "/start - Start bot\n"
+        "/help - Show help\n"
+        "Buy Netflix 1 Screen from menu.\n"
+        "Send payment screenshot after choosing duration.\n"
+        "After approval, receive login details and send Netflix login code.\n\n"
+        "Admin Commands (only for admin):\n"
+        "/approve <user_id> - Approve payment\n"
+        "/reject <user_id> - Reject payment\n"
+        "/set_price <duration> <amount> - Set price\n"
+        "/add_gmail <email> <password> - Add Gmail account\n"
+        "/pending - List pending payments"
+    )
+    await message.answer(help_text)
+
+
+# === Webhook setup for running on Render or similar hosting ===
+
+async def on_startup(app):
+    await bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook set to {WEBHOOK_URL}")
+
+async def on_shutdown(app):
+    logger.info("Shutting down..")
+    await bot.delete_webhook()
+    logger.info("Webhook deleted")
+
+async def handle(request):
+    try:
+        update = Update(**await request.json())
+    except Exception as e:
+        logger.error(f"Failed to parse update: {e}")
+        return web.Response(status=400)
+
+    await dp.process_update(update)
+    return web.Response(status=200)
+
+app = web.Application()
+app.router.add_post(WEBHOOK_PATH, handle)
+
+if __name__ == '__main__':
+    logger.info("Starting bot")
+    start_webhook(
+        dispatcher=dp,
+        webhook_path=WEBHOOK_PATH,
+        on_startup=on_startup,
+        on_shutdown=on_shutdown,
+        skip_updates=True,
+        host='0.0.0.0',
+        port=PORT,
+        app=app,
+    )
